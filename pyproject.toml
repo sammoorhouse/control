@@ -17,3 +17,4 @@ packages = ["turntabl"]
 
 [tool.pytest.ini_options]
 addopts = "-q"
+pythonpath = ["."]
