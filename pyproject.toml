@@ -12,5 +12,8 @@ dependencies = [
 [project.scripts]
 control = "turntabl.cli:app"
 
+[tool.setuptools]
+packages = ["turntabl"]
+
 [tool.pytest.ini_options]
 addopts = "-q"

@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtualenv
+.venv/
+
+# Packaging
+*.egg-info/
+
+# OS
+.DS_Store
