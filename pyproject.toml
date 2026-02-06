@@ -1,0 +1,16 @@
+[project]
+name = "control"
+version = "0.1.0"
+description = "Control staffing and allocation CLI"
+requires-python = ">=3.11"
+
+dependencies = [
+  "typer>=0.12",
+  "rich>=13.0",
+]
+
+[project.scripts]
+control = "turntabl.cli:app"
+
+[tool.pytest.ini_options]
+addopts = "-q"
