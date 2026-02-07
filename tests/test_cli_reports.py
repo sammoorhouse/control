@@ -144,3 +144,66 @@ def test_allocation_window_validation(tmp_path: Path):
         raise AssertionError("Expected window validation to fail")
 
     conn.close()
+
+
+def test_everything_year_report_hierarchy_and_at_risk(tmp_path: Path):
+    env = make_env(tmp_path)
+
+    assert runner.invoke(app, ["init-db"], env=env).exit_code == 0
+    assert runner.invoke(app, ["client", "add", "Acme"], env=env).exit_code == 0
+    assert (
+        runner.invoke(
+            app,
+            [
+                "project",
+                "add",
+                "1",
+                "Phoenix",
+                "2026-01-01",
+                "2026-03-31",
+                "--agreed-rate",
+                "1200",
+                "--status",
+                "provisional",
+            ],
+            env=env,
+        ).exit_code
+        == 0
+    )
+    assert (
+        runner.invoke(
+            app,
+            ["engineer", "add", "Ava", "--level", "3", "--cohort", "2", "--day-rate", "950"],
+            env=env,
+        ).exit_code
+        == 0
+    )
+    assert (
+        runner.invoke(
+            app,
+            ["allocation", "add", "1", "1", "2026-01-20", "2026-02-10", "--status", "provisional"],
+            env=env,
+        ).exit_code
+        == 0
+    )
+
+    result = runner.invoke(app, ["report", "everything-year", "--year", "2026"], env=env)
+    assert result.exit_code == 0
+    lines = [line for line in result.output.splitlines() if line.strip()]
+
+    assert lines[0].startswith("row_id\tparent_id\trow_type\tlabel\tat_risk\texpandable\tJan\tFeb")
+    assert "client:1\t\tclient\tAcme\t0\t1\t14400.0\t12000.0" in result.output
+    assert "project:1\tclient:1\tproject\tPhoenix\t1\t1\t14400.0\t12000.0" in result.output
+    assert "allocation:1\tproject:1\tallocation\tAva 2026-01-20->2026-02-10\t1\t0\t14400.0\t12000.0" in result.output
+    assert "total\t\ttotal\tTOTAL\t0\t0\t14400.0\t12000.0" in result.output
+
+    # Excluding provisional rows removes project/allocation values.
+    result = runner.invoke(
+        app,
+        ["report", "everything-year", "--year", "2026", "--exclude-provisional"],
+        env=env,
+    )
+    assert result.exit_code == 0
+    assert "project:1" not in result.output
+    assert "allocation:1" not in result.output
+    assert "client:1\t\tclient\tAcme\t0\t0\t0.0\t0.0" in result.output
