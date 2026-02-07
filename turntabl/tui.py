@@ -548,16 +548,7 @@ def _draw_header(stdscr, title: str, subtitle: str | None = None) -> int:
     stdscr.clear()
     _, width = stdscr.getmaxyx()
     content = Text(title, style="bold cyan")
-    _, width = stdscr.getmaxyx()
-    content = Text(title, style="bold cyan")
     if subtitle:
-        content.append("\n")
-        content.append(subtitle)
-    panel = Panel(content, box=box.ROUNDED, border_style="cyan")
-    rendered = _render_rich_lines(panel, width - 1)
-    for idx, line in enumerate(rendered):
-        stdscr.addstr(idx, 0, line[: width - 1])
-    return len(rendered)
         content.append("\n")
         content.append(subtitle)
     panel = Panel(content, box=box.ROUNDED, border_style="cyan")

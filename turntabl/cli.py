@@ -176,7 +176,7 @@ def add_project(
     start_date: str,
     end_date: str,
     agreed_rate: Optional[float] = None,
-    status: str = typer.Option("confirmed", case_insensitive=True),
+    status: str = typer.Option("confirmed"),
 ):
     """Add a project."""
     conn = _ensure_db()
@@ -186,6 +186,7 @@ def add_project(
         end_iso = parse_date(end_date)
         if start_iso > end_iso:
             raise DbError("Project start_date must be on or before end_date.")
+    status = status.lower()
     if status not in ("confirmed", "provisional"):
         raise DbError("Status must be 'confirmed' or 'provisional'.")
     cur = conn.execute(
@@ -218,7 +219,7 @@ def add_allocation(
     project_id: int,
     start_date: str,
     end_date: str,
-    status: Optional[str] = typer.Option(None, case_insensitive=True),
+    status: Optional[str] = typer.Option(None),
 ):
     """Allocate an engineer to a project for a date range."""
     conn = _ensure_db()
@@ -233,6 +234,7 @@ def add_allocation(
     if status is None:
         row = conn.execute("SELECT status FROM project WHERE id = ?", (project_id,)).fetchone()
         status = row["status"] if row and row["status"] else "confirmed"
+    status = status.lower()
     if status not in ("confirmed", "provisional"):
         raise DbError("Status must be 'confirmed' or 'provisional'.")
     if end_iso is None:

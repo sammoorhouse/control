@@ -90,7 +90,6 @@ def client_revenue(conn: sqlite3.Connection, as_of: date, include_provisional: b
         ORDER BY c.name ASC
         """,
     )
-    )
     rows = cur.fetchall()
     buckets: dict[int, RevenueRow] = {}
     for row in rows:
