@@ -28,7 +28,7 @@ from .db import (
 )
 from .revenue import client_revenue, engineer_revenue, project_revenue, client_revenue_year
 from .scenarios import add_change, create_scenario, list_changes, list_scenarios, scenario_client_revenue_year
-from .reports import projects_ending_with_details, unallocated_engineers
+from .reports import projects_ending_with_details, report_everything_year, unallocated_engineers
 
 
 @dataclass
@@ -1188,6 +1188,7 @@ def _reports_screen(stdscr, conn) -> None:
         "Engineer Gantt",
         "Unallocated Engineer Gantt",
         "Projects Ending Soon",
+        "Everything Revenue Year",
         "Back",
     ]
     selected = 0
@@ -1207,6 +1208,7 @@ def _reports_screen(stdscr, conn) -> None:
                 ("g", "gantt"),
                 ("u", "unalloc"),
                 ("n", "ending"),
+                ("v", "everything"),
                 ("t", "toggle provisional"),
                 ("b", "back"),
             ],
@@ -1259,6 +1261,10 @@ def _reports_screen(stdscr, conn) -> None:
                 _engineer_gantt_report(stdscr, conn, True, include_provisional)
             elif choice == "Projects Ending Soon":
                 _projects_ending_report(stdscr, conn, include_provisional)
+            elif choice == "Everything Revenue Year":
+                year = _prompt(stdscr, "Year (YYYY): ")
+                year_val = int(year) if year else date.today().year
+                _everything_report_table(stdscr, conn, year_val, include_provisional)
             else:
                 return
         elif key == ord("p"):
@@ -1295,6 +1301,10 @@ def _reports_screen(stdscr, conn) -> None:
             _engineer_gantt_report(stdscr, conn, True, include_provisional)
         elif key == ord("n"):
             _projects_ending_report(stdscr, conn, include_provisional)
+        elif key == ord("v"):
+            year = _prompt(stdscr, "Year (YYYY): ")
+            year_val = int(year) if year else date.today().year
+            _everything_report_table(stdscr, conn, year_val, include_provisional)
 
 
 def _report_table(stdscr, title: str, rows: list[dict]) -> None:
@@ -1350,6 +1360,135 @@ def _report_table(stdscr, title: str, rows: list[dict]) -> None:
             h_offset = min(max(0, max_len - (width - 1)), h_offset + 1)
         if key in (curses.KEY_LEFT, ord("h")):
             h_offset = max(0, h_offset - 1)
+
+
+
+def _everything_report_table(stdscr, conn, year: int, include_provisional: bool) -> None:
+    rows = report_everything_year(conn, year, include_provisional)
+    if not rows:
+        _draw_header(stdscr, f"Everything Revenue {year}", "(no data)")
+        stdscr.refresh()
+        stdscr.getch()
+        return
+
+    months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    by_parent: dict[str, list[dict]] = {}
+    roots: list[dict] = []
+
+    for row in rows:
+        parent = row["parent_id"]
+        if parent:
+            by_parent.setdefault(parent, []).append(row)
+        else:
+            roots.append(row)
+
+    expanded: set[str] = {row["row_id"] for row in roots if row["row_type"] == "client"}
+
+    def visible_rows() -> list[tuple[dict, int]]:
+        ordered: list[tuple[dict, int]] = []
+
+        def walk(node: dict, depth: int) -> None:
+            ordered.append((node, depth))
+            if node["row_id"] not in expanded:
+                return
+            for child in by_parent.get(node["row_id"], []):
+                walk(child, depth + 1)
+
+        normal_roots = [r for r in roots if r["row_type"] != "total"]
+        for root in normal_roots:
+            walk(root, 0)
+        for total in [r for r in roots if r["row_type"] == "total"]:
+            ordered.append((total, 0))
+        return ordered
+
+    def row_text(row: dict, depth: int) -> str:
+        if row["expandable"]:
+            marker = "▾" if row["row_id"] in expanded else "▸"
+        else:
+            marker = " "
+        indent = "  " * depth
+        label = f"{indent}{marker} {row['label']}"
+        risk = "!" if row["at_risk"] else ""
+        vals = [f"{row[m]:.2f}" for m in months]
+        return " | ".join([label, risk, *vals, f"{row['total']:.2f}"])
+
+    header = " | ".join(["Item", "Risk", *months, "Total"])
+    selected = 0
+    offset = 0
+    h_offset = 0
+
+    while True:
+        display = visible_rows()
+        if selected >= len(display):
+            selected = max(0, len(display) - 1)
+        rendered = [header] + [row_text(r, d) for r, d in display]
+
+        start_row = _draw_header(stdscr, f"Everything Revenue {year}", "▸ collapsed  ▾ expanded  ! at-risk")
+        _draw_hints(
+            stdscr,
+            start_row,
+            [("j/k", "move"), ("Enter/Space", "expand/collapse"), ("h/l", "collapse/expand"), ("b", "back")],
+        )
+        start_row += 1
+        height, width = stdscr.getmaxyx()
+        visible_h = max(1, height - start_row - 1)
+
+        if selected < offset:
+            offset = selected
+        if selected >= offset + visible_h - 1:
+            offset = selected - (visible_h - 2)
+            offset = max(0, offset)
+
+        view = rendered[offset : offset + visible_h]
+        for i, line in enumerate(view):
+            clipped = line[h_offset : h_offset + width - 1]
+            attr = 0
+            global_idx = offset + i
+            if global_idx == selected + 1:
+                attr = curses.A_REVERSE
+            try:
+                stdscr.addstr(start_row + i, 0, clipped.ljust(max(0, width - 1)), attr)
+            except curses.error:
+                pass
+
+        stdscr.refresh()
+        key = stdscr.getch()
+        if key in (27, ord("b")):
+            return
+        if key in (curses.KEY_DOWN, ord("j")):
+            selected = min(max(0, len(display) - 1), selected + 1)
+        elif key in (curses.KEY_UP, ord("k")):
+            selected = max(0, selected - 1)
+        elif key in (curses.KEY_RIGHT, ord("l")):
+            if display:
+                row, _ = display[selected]
+                if row["expandable"]:
+                    expanded.add(row["row_id"])
+                else:
+                    max_len = max((len(line) for line in rendered), default=0)
+                    h_offset = min(max(0, max_len - (width - 1)), h_offset + 1)
+        elif key in (curses.KEY_LEFT, ord("h")):
+            if display:
+                row, _ = display[selected]
+                if row["expandable"] and row["row_id"] in expanded:
+                    expanded.remove(row["row_id"])
+                elif row["parent_id"]:
+                    parent_id = row["parent_id"]
+                    for idx, (candidate, _) in enumerate(display):
+                        if candidate["row_id"] == parent_id:
+                            selected = idx
+                            break
+                else:
+                    h_offset = max(0, h_offset - 1)
+        elif key in (curses.KEY_ENTER, 10, 13, ord(" ")):
+            if not display:
+                continue
+            row, _ = display[selected]
+            if row["expandable"]:
+                if row["row_id"] in expanded:
+                    expanded.remove(row["row_id"])
+                else:
+                    expanded.add(row["row_id"])
 
 
 def _engineer_gantt_report(stdscr, conn, unallocated_only: bool, include_provisional: bool) -> None:
