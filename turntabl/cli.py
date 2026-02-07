@@ -16,6 +16,7 @@ from .db import (
     validate_project_window,
 )
 from .reports import (
+    at_risks,
     current_allocations,
     projects_ending_soon,
     projects_with_no_allocations,
@@ -34,6 +35,7 @@ client_app = typer.Typer(help="Manage clients")
 contact_app = typer.Typer(help="Manage contacts")
 project_app = typer.Typer(help="Manage projects")
 allocation_app = typer.Typer(help="Manage allocations")
+at_risk_app = typer.Typer(help="Manage at-risk items")
 report_app = typer.Typer(help="Generate reports")
 
 app.add_typer(engineer_app, name="engineer")
@@ -41,6 +43,7 @@ app.add_typer(client_app, name="client")
 app.add_typer(contact_app, name="contact")
 app.add_typer(project_app, name="project")
 app.add_typer(allocation_app, name="allocation")
+app.add_typer(at_risk_app, name="at-risk")
 app.add_typer(report_app, name="report")
 
 
@@ -264,6 +267,47 @@ def remove_allocation(allocation_id: int):
     typer.echo("Allocation removed.")
 
 
+
+
+@at_risk_app.command("add")
+def add_at_risk(
+    risk_type: str,
+    subject: str,
+    start_date: str,
+    notes: str,
+    end_date: Optional[str] = None,
+):
+    """Add an at-risk item with notes."""
+    conn = _ensure_db()
+    start_iso = parse_date(start_date)
+    end_iso = None
+    if end_date and end_date.lower() not in ("open", "none", "-"):
+        end_iso = parse_date(end_date)
+        if start_iso > end_iso:
+            raise DbError("At-risk start_date must be on or before end_date.")
+    cur = conn.execute(
+        """
+        INSERT INTO at_risk (risk_type, subject, start_date, end_date, notes)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (risk_type, subject, start_iso, end_iso, notes),
+    )
+    conn.commit()
+    conn.close()
+    typer.echo(f"At-risk item added with id {cur.lastrowid}.")
+
+
+@at_risk_app.command("remove")
+def remove_at_risk(at_risk_id: int):
+    """Remove an at-risk item."""
+    conn = _ensure_db()
+    cur = conn.execute("DELETE FROM at_risk WHERE id = ?", (at_risk_id,))
+    conn.commit()
+    conn.close()
+    if cur.rowcount == 0:
+        raise typer.Exit(code=1)
+    typer.echo("At-risk item removed.")
+
 @report_app.command("unallocated")
 def report_unallocated(
     as_of: Optional[str] = None,
@@ -365,6 +409,19 @@ def report_client_revenue_year_command(
     conn.close()
     _print_rows(rows)
 
+
+
+
+@report_app.command("at-risks")
+def report_at_risks(
+    as_of: Optional[str] = None,
+):
+    """List at-risk items with notes."""
+    conn = _ensure_db()
+    day = date.fromisoformat(as_of) if as_of else None
+    rows = at_risks(conn, day)
+    conn.close()
+    _print_rows(rows)
 
 @report_app.command("projects-ending-details")
 def report_projects_ending_details(

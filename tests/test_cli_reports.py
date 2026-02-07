@@ -144,3 +144,48 @@ def test_allocation_window_validation(tmp_path: Path):
         raise AssertionError("Expected window validation to fail")
 
     conn.close()
+
+
+def test_at_risk_report_with_notes_and_as_of_filter(tmp_path: Path):
+    env = make_env(tmp_path)
+    runner.invoke(app, ["init-db"], env=env)
+
+    result = runner.invoke(
+        app,
+        [
+            "at-risk",
+            "add",
+            "project",
+            "Phoenix",
+            "2026-02-01",
+            "Delivery milestone at risk",
+            "--end-date",
+            "2026-02-20",
+        ],
+        env=env,
+    )
+    assert result.exit_code == 0
+
+    result = runner.invoke(
+        app,
+        [
+            "at-risk",
+            "add",
+            "engineer",
+            "Ava",
+            "2026-02-10",
+            "Possible leave impact",
+        ],
+        env=env,
+    )
+    assert result.exit_code == 0
+
+    result = runner.invoke(app, ["report", "at-risks"], env=env)
+    assert result.exit_code == 0
+    assert "Delivery milestone at risk" in result.output
+    assert "Possible leave impact" in result.output
+
+    result = runner.invoke(app, ["report", "at-risks", "--as-of", "2026-03-01"], env=env)
+    assert result.exit_code == 0
+    assert "Delivery milestone at risk" not in result.output
+    assert "Possible leave impact" in result.output

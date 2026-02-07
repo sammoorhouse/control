@@ -100,6 +100,16 @@ def init_db(conn: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS at_risk (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            risk_type TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            start_date TEXT NOT NULL,
+            end_date TEXT,
+            notes TEXT NOT NULL,
+            CHECK (end_date IS NULL OR start_date <= end_date)
+        );
+
         CREATE INDEX IF NOT EXISTS idx_allocation_engineer_dates
             ON allocation (engineer_id, start_date, end_date);
 

@@ -94,6 +94,20 @@ def current_allocations(conn: sqlite3.Connection, as_of: date, include_provision
     return rows_to_dicts(cur.fetchall())
 
 
+def at_risks(conn: sqlite3.Connection, as_of: date | None = None) -> list[dict]:
+    query = """
+        SELECT id, risk_type, subject, start_date, end_date, notes
+        FROM at_risk
+    """
+    params: tuple[str, str] | tuple[()] = ()
+    if as_of is not None:
+        query += " WHERE start_date <= ? AND (end_date IS NULL OR end_date >= ?)"
+        params = (as_of.isoformat(), as_of.isoformat())
+    query += " ORDER BY start_date ASC, id ASC"
+    cur = conn.execute(query, params)
+    return rows_to_dicts(cur.fetchall())
+
+
 def report_project_revenue(conn: sqlite3.Connection, as_of: date, include_provisional: bool = True) -> list[dict]:
     return project_revenue(conn, as_of, include_provisional)
 
