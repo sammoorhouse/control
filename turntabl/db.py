@@ -72,6 +72,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             start_date TEXT NOT NULL,
             end_date TEXT,
             agreed_rate REAL,
+            status TEXT NOT NULL DEFAULT 'confirmed' CHECK (status IN ('confirmed','provisional')),
             CHECK (end_date IS NULL OR start_date <= end_date)
         );
 
@@ -81,6 +82,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             project_id INTEGER NOT NULL REFERENCES project(id) ON DELETE CASCADE,
             start_date TEXT NOT NULL,
             end_date TEXT,
+            status TEXT NOT NULL DEFAULT 'confirmed' CHECK (status IN ('confirmed','provisional')),
             CHECK (end_date IS NULL OR start_date <= end_date)
         );
 
@@ -106,6 +108,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         """
     )
     _migrate_nullable_end_dates(conn)
+    _migrate_status_columns(conn)
     conn.executescript(
         """
         CREATE INDEX IF NOT EXISTS idx_allocation_engineer_dates
@@ -145,10 +148,11 @@ def _migrate_nullable_end_dates(conn: sqlite3.Connection) -> None:
                 start_date TEXT NOT NULL,
                 end_date TEXT,
                 agreed_rate REAL,
+                status TEXT NOT NULL DEFAULT 'confirmed' CHECK (status IN ('confirmed','provisional')),
                 CHECK (end_date IS NULL OR start_date <= end_date)
             );
-            INSERT INTO project (id, client_id, name, start_date, end_date, agreed_rate)
-            SELECT id, client_id, name, start_date, end_date, agreed_rate
+            INSERT INTO project (id, client_id, name, start_date, end_date, agreed_rate, status)
+            SELECT id, client_id, name, start_date, end_date, agreed_rate, 'confirmed'
             FROM project_old;
             DROP TABLE project_old;
             """
@@ -164,13 +168,30 @@ def _migrate_nullable_end_dates(conn: sqlite3.Connection) -> None:
                 project_id INTEGER NOT NULL REFERENCES project(id) ON DELETE CASCADE,
                 start_date TEXT NOT NULL,
                 end_date TEXT,
+                status TEXT NOT NULL DEFAULT 'confirmed' CHECK (status IN ('confirmed','provisional')),
                 CHECK (end_date IS NULL OR start_date <= end_date)
             );
-            INSERT INTO allocation (id, engineer_id, project_id, start_date, end_date)
-            SELECT id, engineer_id, project_id, start_date, end_date
+            INSERT INTO allocation (id, engineer_id, project_id, start_date, end_date, status)
+            SELECT id, engineer_id, project_id, start_date, end_date, 'confirmed'
             FROM allocation_old;
             DROP TABLE allocation_old;
             """
+        )
+
+
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    cur = conn.execute(f"PRAGMA table_info({table})")
+    return any(row["name"] == column for row in cur.fetchall())
+
+
+def _migrate_status_columns(conn: sqlite3.Connection) -> None:
+    if not _column_exists(conn, "project", "status"):
+        conn.execute(
+            "ALTER TABLE project ADD COLUMN status TEXT NOT NULL DEFAULT 'confirmed' CHECK (status IN ('confirmed','provisional'))"
+        )
+    if not _column_exists(conn, "allocation", "status"):
+        conn.execute(
+            "ALTER TABLE allocation ADD COLUMN status TEXT NOT NULL DEFAULT 'confirmed' CHECK (status IN ('confirmed','provisional'))"
         )
 
 

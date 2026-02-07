@@ -41,15 +41,20 @@ def _allocation_revenue(row: sqlite3.Row, as_of: date) -> tuple[float, float]:
     return to_date, total
 
 
-def project_revenue(conn: sqlite3.Connection, as_of: date) -> list[dict]:
+def project_revenue(conn: sqlite3.Connection, as_of: date, include_provisional: bool = True) -> list[dict]:
     cur = conn.execute(
         """
-        SELECT p.id, p.name, a.start_date, a.end_date, p.agreed_rate, e.day_rate
+        SELECT p.id, p.name, p.status, a.start_date, a.end_date, a.status AS alloc_status,
+               p.agreed_rate, e.day_rate
         FROM project p
-        LEFT JOIN allocation a ON a.project_id = p.id
+        LEFT JOIN allocation a
+            ON a.project_id = p.id
+            AND (? = 1 OR a.status = 'confirmed')
         LEFT JOIN engineer e ON e.id = a.engineer_id
+        WHERE (? = 1 OR p.status = 'confirmed')
         ORDER BY p.name ASC
-        """
+        """,
+        (1 if include_provisional else 0, 1 if include_provisional else 0),
     )
     rows = cur.fetchall()
     buckets: dict[int, RevenueRow] = {}
@@ -73,16 +78,18 @@ def project_revenue(conn: sqlite3.Connection, as_of: date) -> list[dict]:
     ]
 
 
-def client_revenue(conn: sqlite3.Connection, as_of: date) -> list[dict]:
+def client_revenue(conn: sqlite3.Connection, as_of: date, include_provisional: bool = True) -> list[dict]:
     cur = conn.execute(
         """
-        SELECT c.id AS client_id, c.name AS client, a.start_date, a.end_date, p.agreed_rate, e.day_rate
+        SELECT c.id AS client_id, c.name AS client, a.start_date, a.end_date,
+               p.agreed_rate, e.day_rate, p.status, a.status AS alloc_status
         FROM client c
         LEFT JOIN project p ON p.client_id = c.id
         LEFT JOIN allocation a ON a.project_id = p.id
         LEFT JOIN engineer e ON e.id = a.engineer_id
         ORDER BY c.name ASC
-        """
+        """,
+    )
     )
     rows = cur.fetchall()
     buckets: dict[int, RevenueRow] = {}
@@ -91,6 +98,8 @@ def client_revenue(conn: sqlite3.Connection, as_of: date) -> list[dict]:
         if cid not in buckets:
             buckets[cid] = RevenueRow(id=cid, name=row["client"], revenue_to_date=0.0, revenue_total=0.0)
         if row["start_date"] is None:
+            continue
+        if not include_provisional and (row["status"] != "confirmed" or row["alloc_status"] != "confirmed"):
             continue
         to_date, total = _allocation_revenue(row, as_of)
         buckets[cid].revenue_to_date += to_date
@@ -106,10 +115,11 @@ def client_revenue(conn: sqlite3.Connection, as_of: date) -> list[dict]:
     ]
 
 
-def engineer_revenue(conn: sqlite3.Connection, as_of: date) -> list[dict]:
+def engineer_revenue(conn: sqlite3.Connection, as_of: date, include_provisional: bool = True) -> list[dict]:
     cur = conn.execute(
         """
-        SELECT e.id AS engineer_id, e.name AS engineer, a.start_date, a.end_date, p.agreed_rate, e.day_rate
+        SELECT e.id AS engineer_id, e.name AS engineer, a.start_date, a.end_date,
+               p.agreed_rate, e.day_rate, p.status, a.status AS alloc_status
         FROM engineer e
         LEFT JOIN allocation a ON a.engineer_id = e.id
         LEFT JOIN project p ON p.id = a.project_id
@@ -123,6 +133,8 @@ def engineer_revenue(conn: sqlite3.Connection, as_of: date) -> list[dict]:
         if eid not in buckets:
             buckets[eid] = RevenueRow(id=eid, name=row["engineer"], revenue_to_date=0.0, revenue_total=0.0)
         if row["start_date"] is None:
+            continue
+        if not include_provisional and (row["status"] != "confirmed" or row["alloc_status"] != "confirmed"):
             continue
         to_date, total = _allocation_revenue(row, as_of)
         buckets[eid].revenue_to_date += to_date
@@ -138,13 +150,14 @@ def engineer_revenue(conn: sqlite3.Connection, as_of: date) -> list[dict]:
     ]
 
 
-def client_revenue_year(conn: sqlite3.Connection, year: int) -> list[dict]:
+def client_revenue_year(conn: sqlite3.Connection, year: int, include_provisional: bool = True) -> list[dict]:
     start_year = date(year, 1, 1)
     end_year = date(year, 12, 31)
     cur = conn.execute(
         """
         SELECT c.id AS client_id, c.name AS client,
-               a.start_date, a.end_date, p.agreed_rate, e.day_rate
+               a.start_date, a.end_date, p.agreed_rate, e.day_rate,
+               p.status, a.status AS alloc_status
         FROM client c
         LEFT JOIN project p ON p.client_id = c.id
         LEFT JOIN allocation a ON a.project_id = p.id
@@ -168,6 +181,8 @@ def client_revenue_year(conn: sqlite3.Connection, year: int) -> list[dict]:
         if cid not in buckets:
             buckets[cid] = {"client_id": cid, "client": row["client"], **{m: 0.0 for m in months}, "total": 0.0}
         if row["start_date"] is None:
+            continue
+        if not include_provisional and (row["status"] != "confirmed" or row["alloc_status"] != "confirmed"):
             continue
         rate = _effective_rate(row)
         if rate is None:

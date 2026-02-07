@@ -7,7 +7,7 @@ from .db import rows_to_dicts
 from .revenue import client_revenue, engineer_revenue, project_revenue, client_revenue_year
 
 
-def unallocated_engineers(conn: sqlite3.Connection, as_of: date) -> list[dict]:
+def unallocated_engineers(conn: sqlite3.Connection, as_of: date, include_provisional: bool = True) -> list[dict]:
     cur = conn.execute(
         """
         SELECT e.id, e.name, e.level, e.day_rate, c.number AS cohort
@@ -17,45 +17,51 @@ def unallocated_engineers(conn: sqlite3.Connection, as_of: date) -> list[dict]:
           AND e.id NOT IN (
               SELECT a.engineer_id
               FROM allocation a
+              JOIN project p ON p.id = a.project_id
               WHERE a.start_date <= ? AND (a.end_date IS NULL OR a.end_date >= ?)
+                AND (? = 1 OR (a.status = 'confirmed' AND p.status = 'confirmed'))
           )
         ORDER BY e.name;
         """,
-        (as_of.isoformat(), as_of.isoformat()),
+        (as_of.isoformat(), as_of.isoformat(), 1 if include_provisional else 0),
     )
     return rows_to_dicts(cur.fetchall())
 
 
-def projects_ending_soon(conn: sqlite3.Connection, as_of: date, within_days: int) -> list[dict]:
+def projects_ending_soon(
+    conn: sqlite3.Connection, as_of: date, within_days: int, include_provisional: bool = True
+) -> list[dict]:
     end_by = as_of + timedelta(days=within_days)
     cur = conn.execute(
         """
-        SELECT p.id, p.name, p.end_date, c.name AS client
+        SELECT p.id, p.name, p.end_date, p.status, c.name AS client
         FROM project p
         JOIN client c ON c.id = p.client_id
         WHERE p.end_date IS NOT NULL AND p.end_date >= ? AND p.end_date <= ?
+          AND (? = 1 OR p.status = 'confirmed')
         ORDER BY p.end_date ASC;
         """,
-        (as_of.isoformat(), end_by.isoformat()),
+        (as_of.isoformat(), end_by.isoformat(), 1 if include_provisional else 0),
     )
     return rows_to_dicts(cur.fetchall())
 
 
-def projects_with_no_allocations(conn: sqlite3.Connection) -> list[dict]:
+def projects_with_no_allocations(conn: sqlite3.Connection, include_provisional: bool = True) -> list[dict]:
     cur = conn.execute(
         """
-        SELECT p.id, p.name, p.start_date, p.end_date, c.name AS client
+        SELECT p.id, p.name, p.start_date, p.end_date, p.status, c.name AS client
         FROM project p
         JOIN client c ON c.id = p.client_id
         LEFT JOIN allocation a ON a.project_id = p.id
-        WHERE a.id IS NULL
+        WHERE a.id IS NULL AND (? = 1 OR p.status = 'confirmed')
         ORDER BY p.start_date ASC;
-        """
+        """,
+        (1 if include_provisional else 0,),
     )
     return rows_to_dicts(cur.fetchall())
 
 
-def current_allocations(conn: sqlite3.Connection, as_of: date) -> list[dict]:
+def current_allocations(conn: sqlite3.Connection, as_of: date, include_provisional: bool = True) -> list[dict]:
     cur = conn.execute(
         """
         SELECT
@@ -69,6 +75,8 @@ def current_allocations(conn: sqlite3.Connection, as_of: date) -> list[dict]:
             p.agreed_rate,
             a.start_date,
             a.end_date,
+            a.status AS allocation_status,
+            p.status AS project_status,
             CASE
                 WHEN p.agreed_rate IS NOT NULL THEN p.agreed_rate
                 ELSE e.day_rate
@@ -78,30 +86,33 @@ def current_allocations(conn: sqlite3.Connection, as_of: date) -> list[dict]:
         JOIN project p ON p.id = a.project_id
         JOIN client c ON c.id = p.client_id
         WHERE a.start_date <= ? AND (a.end_date IS NULL OR a.end_date >= ?)
+          AND (? = 1 OR (a.status = 'confirmed' AND p.status = 'confirmed'))
         ORDER BY e.name;
         """,
-        (as_of.isoformat(), as_of.isoformat()),
+        (as_of.isoformat(), as_of.isoformat(), 1 if include_provisional else 0),
     )
     return rows_to_dicts(cur.fetchall())
 
 
-def report_project_revenue(conn: sqlite3.Connection, as_of: date) -> list[dict]:
-    return project_revenue(conn, as_of)
+def report_project_revenue(conn: sqlite3.Connection, as_of: date, include_provisional: bool = True) -> list[dict]:
+    return project_revenue(conn, as_of, include_provisional)
 
 
-def report_client_revenue(conn: sqlite3.Connection, as_of: date) -> list[dict]:
-    return client_revenue(conn, as_of)
+def report_client_revenue(conn: sqlite3.Connection, as_of: date, include_provisional: bool = True) -> list[dict]:
+    return client_revenue(conn, as_of, include_provisional)
 
 
-def report_engineer_revenue(conn: sqlite3.Connection, as_of: date) -> list[dict]:
-    return engineer_revenue(conn, as_of)
+def report_engineer_revenue(conn: sqlite3.Connection, as_of: date, include_provisional: bool = True) -> list[dict]:
+    return engineer_revenue(conn, as_of, include_provisional)
 
 
-def report_client_revenue_year(conn: sqlite3.Connection, year: int) -> list[dict]:
-    return client_revenue_year(conn, year)
+def report_client_revenue_year(conn: sqlite3.Connection, year: int, include_provisional: bool = True) -> list[dict]:
+    return client_revenue_year(conn, year, include_provisional)
 
 
-def projects_ending_with_details(conn: sqlite3.Connection, as_of: date, within_days: int) -> list[dict]:
+def projects_ending_with_details(
+    conn: sqlite3.Connection, as_of: date, within_days: int, include_provisional: bool = True
+) -> list[dict]:
     end_by = as_of + timedelta(days=within_days)
     cur = conn.execute(
         """
@@ -109,10 +120,12 @@ def projects_ending_with_details(conn: sqlite3.Connection, as_of: date, within_d
             p.id AS project_id,
             p.name AS project,
             p.end_date,
+            p.status AS project_status,
             c.name AS client,
             a.id AS allocation_id,
             a.start_date AS alloc_start,
             a.end_date AS alloc_end,
+            a.status AS alloc_status,
             e.name AS engineer,
             p.agreed_rate,
             e.day_rate
@@ -121,9 +134,10 @@ def projects_ending_with_details(conn: sqlite3.Connection, as_of: date, within_d
         LEFT JOIN allocation a ON a.project_id = p.id
         LEFT JOIN engineer e ON e.id = a.engineer_id
         WHERE p.end_date IS NOT NULL AND p.end_date >= ? AND p.end_date <= ?
+          AND (? = 1 OR p.status = 'confirmed')
         ORDER BY p.end_date ASC, p.name ASC, a.start_date ASC
         """,
-        (as_of.isoformat(), end_by.isoformat()),
+        (as_of.isoformat(), end_by.isoformat(), 1 if include_provisional else 0),
     )
     rows = cur.fetchall()
     projects: dict[int, dict] = {}
@@ -155,6 +169,8 @@ def projects_ending_with_details(conn: sqlite3.Connection, as_of: date, within_d
                 "revenue_total": 0.0,
             }
         if row["allocation_id"] is None:
+            continue
+        if not include_provisional and row["alloc_status"] != "confirmed":
             continue
         end_label = row["alloc_end"] or "open"
         alloc_label = f"{row['engineer']} {row['alloc_start']}->{end_label}"

@@ -173,6 +173,7 @@ def add_project(
     start_date: str,
     end_date: str,
     agreed_rate: Optional[float] = None,
+    status: str = typer.Option("confirmed", case_insensitive=True),
 ):
     """Add a project."""
     conn = _ensure_db()
@@ -182,12 +183,14 @@ def add_project(
         end_iso = parse_date(end_date)
         if start_iso > end_iso:
             raise DbError("Project start_date must be on or before end_date.")
+    if status not in ("confirmed", "provisional"):
+        raise DbError("Status must be 'confirmed' or 'provisional'.")
     cur = conn.execute(
         """
-        INSERT INTO project (client_id, name, start_date, end_date, agreed_rate)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO project (client_id, name, start_date, end_date, agreed_rate, status)
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (client_id, name, start_iso, end_iso, agreed_rate),
+        (client_id, name, start_iso, end_iso, agreed_rate, status),
     )
     conn.commit()
     conn.close()
@@ -212,6 +215,7 @@ def add_allocation(
     project_id: int,
     start_date: str,
     end_date: str,
+    status: Optional[str] = typer.Option(None, case_insensitive=True),
 ):
     """Allocate an engineer to a project for a date range."""
     conn = _ensure_db()
@@ -223,6 +227,11 @@ def add_allocation(
             raise DbError("Allocation start_date must be on or before end_date.")
     validate_engineer_exists(conn, engineer_id)
     validate_project_exists(conn, project_id)
+    if status is None:
+        row = conn.execute("SELECT status FROM project WHERE id = ?", (project_id,)).fetchone()
+        status = row["status"] if row and row["status"] else "confirmed"
+    if status not in ("confirmed", "provisional"):
+        raise DbError("Status must be 'confirmed' or 'provisional'.")
     if end_iso is None:
         cur = conn.execute("SELECT end_date FROM project WHERE id = ?", (project_id,))
         row = cur.fetchone()
@@ -233,10 +242,10 @@ def add_allocation(
         validate_project_window(conn, project_id, start_iso, end_iso)
     cur = conn.execute(
         """
-        INSERT INTO allocation (engineer_id, project_id, start_date, end_date)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO allocation (engineer_id, project_id, start_date, end_date, status)
+        VALUES (?, ?, ?, ?, ?)
         """,
-        (engineer_id, project_id, start_iso, end_iso),
+        (engineer_id, project_id, start_iso, end_iso, status),
     )
     conn.commit()
     conn.close()
@@ -256,11 +265,14 @@ def remove_allocation(allocation_id: int):
 
 
 @report_app.command("unallocated")
-def report_unallocated(as_of: Optional[str] = None):
+def report_unallocated(
+    as_of: Optional[str] = None,
+    include_provisional: bool = typer.Option(True, "--include-provisional/--exclude-provisional"),
+):
     """List currently unallocated engineers."""
     conn = _ensure_db()
     day = date.fromisoformat(as_of) if as_of else date.today()
-    rows = unallocated_engineers(conn, day)
+    rows = unallocated_engineers(conn, day, include_provisional)
     conn.close()
     _print_rows(rows)
 
@@ -269,60 +281,75 @@ def report_unallocated(as_of: Optional[str] = None):
 def report_projects_ending(
     within: int = typer.Option(30, min=1),
     as_of: Optional[str] = None,
+    include_provisional: bool = typer.Option(True, "--include-provisional/--exclude-provisional"),
 ):
     """List projects ending soon."""
     conn = _ensure_db()
     day = date.fromisoformat(as_of) if as_of else date.today()
-    rows = projects_ending_soon(conn, day, within)
+    rows = projects_ending_soon(conn, day, within, include_provisional)
     conn.close()
     _print_rows(rows)
 
 
 @report_app.command("projects-no-allocations")
-def report_projects_no_allocations():
+def report_projects_no_allocations(
+    include_provisional: bool = typer.Option(True, "--include-provisional/--exclude-provisional"),
+):
     """List projects with no allocations."""
     conn = _ensure_db()
-    rows = projects_with_no_allocations(conn)
+    rows = projects_with_no_allocations(conn, include_provisional)
     conn.close()
     _print_rows(rows)
 
 
 @report_app.command("allocations")
-def report_allocations(as_of: Optional[str] = None):
+def report_allocations(
+    as_of: Optional[str] = None,
+    include_provisional: bool = typer.Option(True, "--include-provisional/--exclude-provisional"),
+):
     """List currently allocated engineers with project details."""
     conn = _ensure_db()
     day = date.fromisoformat(as_of) if as_of else date.today()
-    rows = current_allocations(conn, day)
+    rows = current_allocations(conn, day, include_provisional)
     conn.close()
     _print_rows(rows)
 
 
 @report_app.command("project-revenue")
-def report_project_revenue_command(as_of: Optional[str] = None):
+def report_project_revenue_command(
+    as_of: Optional[str] = None,
+    include_provisional: bool = typer.Option(True, "--include-provisional/--exclude-provisional"),
+):
     """Project revenue to date and total."""
     conn = _ensure_db()
     day = date.fromisoformat(as_of) if as_of else date.today()
-    rows = report_project_revenue(conn, day)
+    rows = report_project_revenue(conn, day, include_provisional)
     conn.close()
     _print_rows(rows)
 
 
 @report_app.command("client-revenue")
-def report_client_revenue_command(as_of: Optional[str] = None):
+def report_client_revenue_command(
+    as_of: Optional[str] = None,
+    include_provisional: bool = typer.Option(True, "--include-provisional/--exclude-provisional"),
+):
     """Client revenue to date and total."""
     conn = _ensure_db()
     day = date.fromisoformat(as_of) if as_of else date.today()
-    rows = report_client_revenue(conn, day)
+    rows = report_client_revenue(conn, day, include_provisional)
     conn.close()
     _print_rows(rows)
 
 
 @report_app.command("engineer-revenue")
-def report_engineer_revenue_command(as_of: Optional[str] = None):
+def report_engineer_revenue_command(
+    as_of: Optional[str] = None,
+    include_provisional: bool = typer.Option(True, "--include-provisional/--exclude-provisional"),
+):
     """Engineer revenue to date and total."""
     conn = _ensure_db()
     day = date.fromisoformat(as_of) if as_of else date.today()
-    rows = report_engineer_revenue(conn, day)
+    rows = report_engineer_revenue(conn, day, include_provisional)
     conn.close()
     _print_rows(rows)
 
@@ -330,10 +357,11 @@ def report_engineer_revenue_command(as_of: Optional[str] = None):
 @report_app.command("client-revenue-year")
 def report_client_revenue_year_command(
     year: int = typer.Option(date.today().year, min=2000, max=2100),
+    include_provisional: bool = typer.Option(True, "--include-provisional/--exclude-provisional"),
 ):
     """Client revenue by month for a year."""
     conn = _ensure_db()
-    rows = report_client_revenue_year(conn, year)
+    rows = report_client_revenue_year(conn, year, include_provisional)
     conn.close()
     _print_rows(rows)
 
@@ -342,11 +370,12 @@ def report_client_revenue_year_command(
 def report_projects_ending_details(
     within: int = typer.Option(30, min=1),
     as_of: Optional[str] = None,
+    include_provisional: bool = typer.Option(True, "--include-provisional/--exclude-provisional"),
 ):
     """Projects ending soon with allocations and revenue."""
     conn = _ensure_db()
     day = date.fromisoformat(as_of) if as_of else date.today()
-    rows = projects_ending_with_details(conn, day, within)
+    rows = projects_ending_with_details(conn, day, within, include_provisional)
     conn.close()
     _print_rows(rows)
 

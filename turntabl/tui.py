@@ -7,7 +7,10 @@ from datetime import date, datetime
 from typing import Callable, Iterable
 
 from rich.console import Console
+from rich.console import Group
+from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 from rich import box
 
 from .db import (
@@ -32,6 +35,7 @@ class Project:
     client: str
     start_date: str
     end_date: str | None
+    status: str
 
 
 @dataclass
@@ -48,6 +52,16 @@ class Engineer:
 class Client:
     id: int
     name: str
+
+
+@dataclass
+class FormField:
+    key: str
+    label: str
+    value: str
+    required: bool = False
+    readonly: bool = False
+    choices: list[str] | None = None
 
 
 ADVANCED_MODE = False
@@ -80,7 +94,7 @@ def _save_config() -> None:
 def _fetch_projects(conn) -> list[Project]:
     cur = conn.execute(
         """
-        SELECT p.id, p.name, c.name AS client, p.start_date, p.end_date
+        SELECT p.id, p.name, c.name AS client, p.start_date, p.end_date, p.status
         FROM project p
         JOIN client c ON c.id = p.client_id
         ORDER BY p.start_date DESC, p.name ASC
@@ -93,6 +107,7 @@ def _fetch_projects(conn) -> list[Project]:
             client=row["client"],
             start_date=row["start_date"],
             end_date=row["end_date"],
+            status=row["status"],
         )
         for row in cur.fetchall()
     ]
@@ -189,7 +204,7 @@ def _fuzzy_sort_with_labels(term: str, items: list[tuple[str, object]]) -> list[
 def _fetch_project_allocations(conn, project_id: int) -> list[dict]:
     cur = conn.execute(
         """
-        SELECT a.id, a.start_date, a.end_date,
+        SELECT a.id, a.start_date, a.end_date, a.status,
                e.id AS engineer_id, e.name AS engineer
         FROM allocation a
         JOIN engineer e ON e.id = a.engineer_id
@@ -204,7 +219,7 @@ def _fetch_project_allocations(conn, project_id: int) -> list[dict]:
 def _fetch_engineer_allocations(conn, engineer_id: int) -> list[dict]:
     cur = conn.execute(
         """
-        SELECT a.id, a.start_date, a.end_date,
+        SELECT a.id, a.start_date, a.end_date, a.status,
                p.id AS project_id, p.name AS project,
                c.name AS client
         FROM allocation a
@@ -225,12 +240,14 @@ def _fetch_allocation_detail(conn, allocation_id: int) -> dict | None:
             a.id AS allocation_id,
             a.start_date,
             a.end_date,
+            a.status AS allocation_status,
             e.id AS engineer_id,
             e.name AS engineer,
             e.day_rate,
             p.id AS project_id,
             p.name AS project,
             p.agreed_rate,
+            p.status AS project_status,
             c.name AS client
         FROM allocation a
         JOIN engineer e ON e.id = a.engineer_id
@@ -258,6 +275,101 @@ def _prompt(stdscr, prompt: str) -> str:
     return value
 
 
+def _status_label(status: str) -> str:
+    return "Provisional" if status == "provisional" else "Confirmed"
+
+
+def _cycle_choice(field: FormField, direction: int) -> None:
+    if not field.choices:
+        return
+    if field.value not in field.choices:
+        field.value = field.choices[0]
+        return
+    idx = field.choices.index(field.value)
+    field.value = field.choices[(idx + direction) % len(field.choices)]
+
+
+def _edit_field_value(stdscr, row: int, col: int, current: str, max_width: int) -> str:
+    curses.echo()
+    stdscr.move(row, col)
+    stdscr.clrtoeol()
+    stdscr.addstr(row, col, current[: max(0, max_width - 1)])
+    stdscr.refresh()
+    value = stdscr.getstr().decode("utf-8").strip()
+    curses.noecho()
+    return value
+
+
+def _form_screen(
+    stdscr,
+    title: str,
+    subtitle: str | None,
+    fields: list[FormField],
+) -> dict | None:
+    selected = 0
+    while True:
+        start_row = _draw_header(stdscr, title, subtitle)
+        _draw_hints(
+            stdscr,
+            start_row,
+            [("↑/↓", "move"), ("Enter", "edit"), ("←/→", "toggle"), ("s", "save"), ("b", "back")],
+        )
+        start_row += 1
+        height, width = stdscr.getmaxyx()
+        max_rows = max(1, height - start_row - 1)
+        offset = 0
+        if selected >= max_rows:
+            offset = selected - max_rows + 1
+        view = fields[offset : offset + max_rows]
+        for idx, field in enumerate(view):
+            absolute = offset + idx
+            value = field.value
+            if field.choices and field.value in field.choices:
+                value = _status_label(field.value) if field.key.endswith("_status") else field.value
+            line = f"{field.label}: {value}"
+            if field.required and not field.value:
+                line += " *"
+            attr = curses.A_REVERSE if absolute == selected else 0
+            stdscr.addstr(start_row + idx, 0, line[: width - 1], attr)
+        stdscr.refresh()
+        key = stdscr.getch()
+        if key in (27, ord("b")):
+            return None
+        if key in (curses.KEY_UP, ord("k")):
+            selected = max(0, selected - 1)
+            continue
+        if key in (curses.KEY_DOWN, ord("j")):
+            selected = min(len(fields) - 1, selected + 1)
+            continue
+        current = fields[selected]
+        if key in (curses.KEY_LEFT, ord("h")):
+            if not current.readonly and current.choices:
+                _cycle_choice(current, -1)
+            continue
+        if key in (curses.KEY_RIGHT, ord("l")):
+            if not current.readonly and current.choices:
+                _cycle_choice(current, 1)
+            continue
+        if key in (curses.KEY_ENTER, 10, 13):
+            if current.readonly:
+                continue
+            if current.choices:
+                _cycle_choice(current, 1)
+                continue
+            row = start_row + (selected - offset)
+            col = len(f"{current.label}: ")
+            current.value = _edit_field_value(stdscr, row, col, current.value, width - col)
+            continue
+        if key in (ord("s"),):
+            missing = [f.label for f in fields if f.required and not f.value]
+            if missing:
+                _draw_header(stdscr, "Error", f"Missing: {', '.join(missing)}")
+                stdscr.refresh()
+                stdscr.getch()
+                continue
+            return {f.key: f.value for f in fields}
+
+
 def _select_with_search(
     stdscr,
     title: str,
@@ -265,49 +377,115 @@ def _select_with_search(
     items: list[tuple[str, object]],
     search_prompt: str,
 ) -> object | None:
-    term = _prompt(stdscr, search_prompt)
-    if not term:
-        return None
-    results = _fuzzy_sort_with_labels(term, items)
-    ordered_labels = [label for label, _ in results]
-    idx = _select_from_list(stdscr, title, subtitle, ordered_labels)
-    if idx is None:
-        return None
-    return results[idx][1]
+    del subtitle
+    prompt_label = search_prompt.rstrip(": ")
+    return _fuzzy_modal_select(stdscr, title, prompt_label, items)
+
+
+def _render_rich_lines(renderable, width: int) -> list[str]:
+    console = Console(record=True, width=max(20, width), force_terminal=False, color_system=None)
+    console.print(renderable)
+    return console.export_text(styles=False).splitlines()
+
+
+def _fuzzy_modal_select(
+    stdscr,
+    title: str,
+    prompt_label: str,
+    items: list[tuple[str, object]],
+) -> object | None:
+    term = ""
+    selected = 0
+    offset = 0
+    while True:
+        height, width = stdscr.getmaxyx()
+        modal_height = max(10, min(height - 2, 20))
+        modal_width = max(40, min(width - 4, 90))
+        start_y = (height - modal_height) // 2
+        start_x = (width - modal_width) // 2
+
+        results = items if not term else _fuzzy_sort_with_labels(term, items)
+        visible_rows = max(1, modal_height - 6)
+        selected = min(selected, max(0, len(results) - 1))
+        if selected < offset:
+            offset = selected
+        if selected >= offset + visible_rows:
+            offset = selected - visible_rows + 1
+        window_items = results[offset : offset + visible_rows]
+
+        lines = [Text(f"{prompt_label}: {term}", style="bold")]
+        if not results:
+            lines.append(Text("(no results)", style="dim"))
+        for idx, (label, _) in enumerate(window_items):
+            absolute = offset + idx
+            prefix = "▶ " if absolute == selected else "  "
+            style = "reverse" if absolute == selected else ""
+            lines.append(Text(prefix + label, style=style))
+
+        panel = Panel(
+            Group(*lines),
+            title=title,
+            subtitle="type to search • ↑/↓ move • Enter select • Esc cancel",
+            border_style="cyan",
+            box=box.ROUNDED,
+            width=modal_width,
+        )
+        rendered = _render_rich_lines(panel, modal_width)
+        stdscr.clear()
+        for idx, line in enumerate(rendered[:modal_height]):
+            stdscr.addstr(start_y + idx, start_x, line[: modal_width - 1])
+        stdscr.refresh()
+
+        key = stdscr.getch()
+        if key in (27, ord("q"), ord("b")):
+            return None
+        if key in (curses.KEY_ENTER, 10, 13):
+            if results:
+                return results[selected][1]
+            continue
+        if key in (curses.KEY_UP, ord("k")):
+            selected = max(0, selected - 1)
+            continue
+        if key in (curses.KEY_DOWN, ord("j")):
+            selected = min(max(0, len(results) - 1), selected + 1)
+            continue
+        if key in (curses.KEY_BACKSPACE, 127, 8):
+            term = term[:-1]
+            selected = 0
+            offset = 0
+            continue
+        if 32 <= key <= 126:
+            term += chr(key)
+            selected = 0
+            offset = 0
 
 
 def _draw_header(stdscr, title: str, subtitle: str | None = None) -> int:
     stdscr.clear()
-    title_attr = curses.A_BOLD | (curses.color_pair(1) if COLOR_ENABLED else 0)
-    stdscr.addstr(0, 0, title, title_attr)
+    _, width = stdscr.getmaxyx()
+    content = Text(title, style="bold cyan")
     if subtitle:
-        stdscr.addstr(1, 0, subtitle)
-        return 2
-    return 1
+        content.append("\n")
+        content.append(subtitle)
+    panel = Panel(content, box=box.ROUNDED, border_style="cyan")
+    rendered = _render_rich_lines(panel, width - 1)
+    for idx, line in enumerate(rendered):
+        stdscr.addstr(idx, 0, line[: width - 1])
+    return len(rendered)
 
 
 def _draw_hints(stdscr, row: int, hints: list[tuple[str, str]]) -> None:
+    del row
+    height, width = stdscr.getmaxyx()
     if ADVANCED_MODE:
-        keys = "".join(key for key, _ in hints)
-        stdscr.addstr(row, 0, keys, curses.A_DIM if COLOR_ENABLED else 0)
-        return
-    col = 0
-    for key, word in hints:
-        lower = word.lower()
-        try:
-            idx = lower.index(key.lower())
-        except ValueError:
-            idx = 0
-        for i, ch in enumerate(word):
-            attr = 0
-            if i == idx:
-                attr |= curses.A_UNDERLINE
-            if COLOR_ENABLED and i == idx:
-                attr |= curses.color_pair(2)
-            stdscr.addstr(row, col, ch, attr)
-            col += 1
-        stdscr.addstr(row, col, " ")
-        col += 1
+        hint_text = " ".join(key for key, _ in hints)
+    else:
+        hint_text = " • ".join(f"[{key}] {word}" for key, word in hints)
+    text = hint_text[: max(0, width - 1)]
+    try:
+        stdscr.addstr(height - 1, 0, text.ljust(max(0, width - 1)), curses.A_REVERSE)
+    except curses.error:
+        pass
 
 
 def _allocation_detail_screen(stdscr, conn, allocation_id: int) -> None:
@@ -335,6 +513,8 @@ def _allocation_detail_screen(stdscr, conn, allocation_id: int) -> None:
         f"Engineer: {detail['engineer']} (id {detail['engineer_id']})",
         f"Project: {detail['project']} (id {detail['project_id']})",
         f"Client: {detail['client']}",
+        f"Allocation status: {detail.get('allocation_status', 'confirmed')}",
+        f"Project status: {detail.get('project_status', 'confirmed')}",
         f"Dates: {start} -> {end_label}",
         f"Engineer day rate: {day_rate if day_rate is not None else 'n/a'}",
         f"Project agreed rate: {agreed_rate if agreed_rate is not None else 'n/a'}",
@@ -357,17 +537,20 @@ def _allocation_detail_screen(stdscr, conn, allocation_id: int) -> None:
 
 def _draw_list(stdscr, items: list[str], selected: int, start_row: int) -> None:
     height, width = stdscr.getmaxyx()
-    max_rows = height - start_row - 1
+    max_rows = max(1, height - start_row - 1)
     offset = 0
     if selected >= max_rows:
         offset = selected - max_rows + 1
     view = items[offset : offset + max_rows]
+    rows = []
     for idx, item in enumerate(view):
-        row = start_row + idx
-        if offset + idx == selected:
-            stdscr.addstr(row, 0, item[: width - 1], curses.A_REVERSE)
-        else:
-            stdscr.addstr(row, 0, item[: width - 1])
+        absolute = offset + idx
+        prefix = "▶ " if absolute == selected else "  "
+        style = "reverse" if absolute == selected else ""
+        rows.append(Text(prefix + item, style=style))
+    rendered = _render_rich_lines(Panel(Group(*rows), box=box.SIMPLE), width - 1)
+    for idx, line in enumerate(rendered[: max_rows]):
+        stdscr.addstr(start_row + idx, 0, line[: width - 1])
 
 
 def _select_from_list(
@@ -409,8 +592,9 @@ def _gantt_rows(allocations: list[dict], start: date, end: date, width: int) -> 
         start_offset = max(0, (a_start - start).days) // scale
         end_offset = max(0, (a_end - start).days) // scale
         bar = [" "] * max(1, (total_days // scale) + 1)
+        mark = "." if alloc.get("status") == "provisional" else "#"
         for i in range(start_offset, min(end_offset + 1, len(bar))):
-            bar[i] = "#"
+            bar[i] = mark
         label = f"{alloc['engineer']:<16}"[:16]
         rows.append(label + " " + "".join(bar))
     return rows
@@ -437,12 +621,27 @@ def _render_engineer_gaps(allocations: list[dict]) -> list[str]:
 
 def _add_allocation_prompt(conn, stdscr, engineer_id: int, project_id: int) -> str | None:
     try:
-        start = _prompt(stdscr, "Start date (YYYY-MM-DD): ")
-        end = _prompt(stdscr, "End date (YYYY-MM-DD, blank=open): ")
-        start_iso = parse_date(start)
+        e_row = conn.execute("SELECT name FROM engineer WHERE id = ?", (engineer_id,)).fetchone()
+        p_row = conn.execute(
+            "SELECT name, status, end_date FROM project WHERE id = ?", (project_id,)
+        ).fetchone()
+        engineer_label = e_row["name"] if e_row else f"id {engineer_id}"
+        project_label = p_row["name"] if p_row else f"id {project_id}"
+        default_status = p_row["status"] if p_row and p_row["status"] else "confirmed"
+        fields = [
+            FormField("engineer", "Engineer", engineer_label, readonly=True),
+            FormField("project", "Project", project_label, readonly=True),
+            FormField("start_date", "Start date (YYYY-MM-DD)", "", required=True),
+            FormField("end_date", "End date (YYYY-MM-DD, blank=open)", ""),
+            FormField("allocation_status", "Status", default_status, choices=["confirmed", "provisional"]),
+        ]
+        values = _form_screen(stdscr, "Add Allocation", None, fields)
+        if values is None:
+            return "Allocation creation cancelled."
+        start_iso = parse_date(values["start_date"])
         end_iso = None
-        if end:
-            end_iso = parse_date(end)
+        if values["end_date"]:
+            end_iso = parse_date(values["end_date"])
             if start_iso > end_iso:
                 return "Start date must be on or before end date."
         validate_engineer_exists(conn, engineer_id)
@@ -456,8 +655,11 @@ def _add_allocation_prompt(conn, stdscr, engineer_id: int, project_id: int) -> s
         else:
             validate_project_window(conn, project_id, start_iso, end_iso)
         conn.execute(
-            "INSERT INTO allocation (engineer_id, project_id, start_date, end_date) VALUES (?, ?, ?, ?)",
-            (engineer_id, project_id, start_iso, end_iso),
+            """
+            INSERT INTO allocation (engineer_id, project_id, start_date, end_date, status)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (engineer_id, project_id, start_iso, end_iso, values["allocation_status"]),
         )
         conn.commit()
         return None
@@ -478,20 +680,30 @@ def _add_project_prompt(conn, stdscr) -> str | None:
         )
         if client is None:
             return "Client selection cancelled."
-        name = _prompt(stdscr, "Project name: ")
-        start = _prompt(stdscr, "Start date (YYYY-MM-DD): ")
-        end = _prompt(stdscr, "End date (YYYY-MM-DD, blank=open): ")
-        agreed_rate_raw = _prompt(stdscr, "Agreed rate (blank for none): ")
-        start_iso = parse_date(start)
+        fields = [
+            FormField("name", "Project name", "", required=True),
+            FormField("start_date", "Start date (YYYY-MM-DD)", "", required=True),
+            FormField("end_date", "End date (YYYY-MM-DD, blank=open)", ""),
+            FormField("agreed_rate", "Agreed rate (blank for none)", ""),
+            FormField("project_status", "Status", "confirmed", choices=["confirmed", "provisional"]),
+        ]
+        values = _form_screen(stdscr, "Add Project", f"Client: {client.name}", fields)
+        if values is None:
+            return "Project creation cancelled."
+        start_iso = parse_date(values["start_date"])
         end_iso = None
-        if end:
-            end_iso = parse_date(end)
+        if values["end_date"]:
+            end_iso = parse_date(values["end_date"])
             if start_iso > end_iso:
                 return "Project start date must be on or before end date."
-        agreed_rate = float(agreed_rate_raw) if agreed_rate_raw else None
+        agreed_rate = float(values["agreed_rate"]) if values["agreed_rate"] else None
+        status = values["project_status"]
         conn.execute(
-            "INSERT INTO project (client_id, name, start_date, end_date, agreed_rate) VALUES (?, ?, ?, ?, ?)",
-            (client.id, name, start_iso, end_iso, agreed_rate),
+            """
+            INSERT INTO project (client_id, name, start_date, end_date, agreed_rate, status)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (client.id, values["name"], start_iso, end_iso, agreed_rate, status),
         )
         conn.commit()
         return None
@@ -501,19 +713,24 @@ def _add_project_prompt(conn, stdscr) -> str | None:
 
 def _add_engineer_prompt(conn, stdscr) -> str | None:
     try:
-        name = _prompt(stdscr, "Engineer name: ")
-        level_raw = _prompt(stdscr, "Level (1-5): ")
-        cohort_raw = _prompt(stdscr, "Cohort (1-8): ")
-        day_rate_raw = _prompt(stdscr, "Day rate (blank for none): ")
-        active_raw = _prompt(stdscr, "Active? (y/n): ")
-        level = int(level_raw)
-        cohort = int(cohort_raw)
-        day_rate = float(day_rate_raw) if day_rate_raw else None
-        active = 1 if active_raw.lower() in ("y", "yes", "1", "") else 0
+        fields = [
+            FormField("name", "Engineer name", "", required=True),
+            FormField("level", "Level (1-5)", "", required=True),
+            FormField("cohort", "Cohort (1-8)", "", required=True),
+            FormField("day_rate", "Day rate (blank for none)", ""),
+            FormField("active", "Active", "yes", choices=["yes", "no"]),
+        ]
+        values = _form_screen(stdscr, "Add Engineer", None, fields)
+        if values is None:
+            return "Engineer creation cancelled."
+        level = int(values["level"])
+        cohort = int(values["cohort"])
+        day_rate = float(values["day_rate"]) if values["day_rate"] else None
+        active = 1 if values["active"] == "yes" else 0
         cohort_id = ensure_cohort(conn, cohort)
         conn.execute(
             "INSERT INTO engineer (name, level, day_rate, cohort_id, active) VALUES (?, ?, ?, ?, ?)",
-            (name, level, day_rate, cohort_id, active),
+            (values["name"], level, day_rate, cohort_id, active),
         )
         conn.commit()
         return None
@@ -523,10 +740,13 @@ def _add_engineer_prompt(conn, stdscr) -> str | None:
 
 def _add_client_prompt(conn, stdscr) -> str | None:
     try:
-        name = _prompt(stdscr, "Client name: ")
-        if not name:
+        fields = [FormField("name", "Client name", "", required=True)]
+        values = _form_screen(stdscr, "Add Client", None, fields)
+        if values is None:
+            return "Client creation cancelled."
+        if not values["name"]:
             return "Client name is required."
-        conn.execute("INSERT INTO client (name) VALUES (?)", (name,))
+        conn.execute("INSERT INTO client (name) VALUES (?)", (values["name"],))
         conn.commit()
         return None
     except (ValueError, DbError) as exc:
@@ -555,7 +775,10 @@ def _project_screen(stdscr, conn, project: Project):
         lines = []
         for a in allocs:
             end_label = a["end_date"] if a["end_date"] else "open"
-            lines.append(f"{a['engineer']} | {a['start_date']} -> {end_label} (alloc {a['id']})")
+            status = " (prov)" if a.get("status") == "provisional" else ""
+            lines.append(
+                f"{a['engineer']} | {a['start_date']} -> {end_label} (alloc {a['id']}){status}"
+            )
         if not lines:
             lines = ["(no allocations)"]
         _draw_list(stdscr, lines, selected, start_row)
@@ -650,7 +873,10 @@ def _engineer_screen(stdscr, conn, engineer: Engineer):
         lines = []
         for a in allocs:
             end_label = a["end_date"] if a["end_date"] else "open"
-            lines.append(f"{a['project']} ({a['client']}) | {a['start_date']} -> {end_label} (alloc {a['id']})")
+            status = " (prov)" if a.get("status") == "provisional" else ""
+            lines.append(
+                f"{a['project']} ({a['client']}) | {a['start_date']} -> {end_label} (alloc {a['id']}){status}"
+            )
         alloc_count = len(allocs)
         if alloc_count == 0:
             selected = 0
@@ -704,7 +930,7 @@ def _projects_list(stdscr, conn):
         else:
             items = ["(no projects yet)"]
         start_row = _draw_header(stdscr, "Projects", None)
-        _draw_hints(stdscr, start_row, [("o", "open"), ("a", "add"), ("b", "back")])
+        _draw_hints(stdscr, start_row, [("o", "open"), ("/", "search"), ("a", "add"), ("b", "back")])
         start_row += 1
         _draw_list(stdscr, items, selected, start_row)
         stdscr.refresh()
@@ -713,6 +939,16 @@ def _projects_list(stdscr, conn):
             selected = max(0, selected - 1)
         elif key in (curses.KEY_DOWN, ord("j")):
             selected = min(len(projects) - 1, selected + 1)
+        elif key in (ord("/"), ord("s")):
+            all_projects = _fetch_projects(conn)
+            items_pairs = [
+                (f"{p.name} ({p.client}) {p.start_date} -> {p.end_date or 'open'}", p)
+                for p in all_projects
+            ]
+            choice = _select_with_search(stdscr, "Search projects", "", items_pairs, "Search")
+            if choice:
+                projects = all_projects
+                selected = next((idx for idx, p in enumerate(projects) if p.id == choice.id), 0)
         elif key == ord("a"):
             err = _add_project_prompt(conn, stdscr)
             if err:
@@ -739,7 +975,7 @@ def _engineers_list(stdscr, conn):
         else:
             items = ["(no engineers yet)"]
         start_row = _draw_header(stdscr, "Engineers", None)
-        _draw_hints(stdscr, start_row, [("o", "open"), ("s", "search"), ("a", "add"), ("b", "back")])
+        _draw_hints(stdscr, start_row, [("o", "open"), ("/", "search"), ("a", "add"), ("b", "back")])
         start_row += 1
         _draw_list(stdscr, items, selected, start_row)
         stdscr.refresh()
@@ -749,10 +985,12 @@ def _engineers_list(stdscr, conn):
         elif key in (curses.KEY_DOWN, ord("j")):
             selected = min(len(engineers) - 1, selected + 1)
         elif key in (ord("/"), ord("s")):
-            term = _prompt(stdscr, "Search engineer: ")
-            items = [(f"{e.name} (L{e.level}, Cohort {e.cohort})", e) for e in _fetch_engineers(conn)]
-            engineers = [obj for _, obj in _fuzzy_sort_with_labels(term, items)]
-            selected = 0
+            all_engineers = _fetch_engineers(conn)
+            items = [(f"{e.name} (L{e.level}, Cohort {e.cohort})", e) for e in all_engineers]
+            choice = _select_with_search(stdscr, "Search engineers", "", items, "Search")
+            if choice:
+                engineers = all_engineers
+                selected = next((idx for idx, e in enumerate(engineers) if e.id == choice.id), 0)
         elif key == ord("a"):
             err = _add_engineer_prompt(conn, stdscr)
             if err:
@@ -789,7 +1027,7 @@ def _clients_list(stdscr, conn):
         else:
             items = ["(no clients yet)"]
         start_row = _draw_header(stdscr, "Clients", None)
-        _draw_hints(stdscr, start_row, [("a", "add"), ("s", "search"), ("b", "back")])
+        _draw_hints(stdscr, start_row, [("/", "search"), ("a", "add"), ("b", "back")])
         start_row += 1
         _draw_list(stdscr, items, selected, start_row)
         stdscr.refresh()
@@ -799,10 +1037,12 @@ def _clients_list(stdscr, conn):
         elif key in (curses.KEY_DOWN, ord("j")):
             selected = min(len(clients) - 1, selected + 1)
         elif key in (ord("/"), ord("s")):
-            term = _prompt(stdscr, "Search client: ")
-            items_pairs = [(c.name, c) for c in _fetch_clients(conn)]
-            clients = [obj for _, obj in _fuzzy_sort_with_labels(term, items_pairs)]
-            selected = 0
+            all_clients = _fetch_clients(conn)
+            items_pairs = [(c.name, c) for c in all_clients]
+            choice = _select_with_search(stdscr, "Search clients", "", items_pairs, "Search")
+            if choice:
+                clients = all_clients
+                selected = next((idx for idx, c in enumerate(clients) if c.id == choice.id), 0)
         elif key == ord("a"):
             err = _add_client_prompt(conn, stdscr)
             if err:
@@ -818,33 +1058,36 @@ def _clients_list(stdscr, conn):
 def _config_screen(stdscr) -> None:
     global ADVANCED_MODE
     selected = 0 if not ADVANCED_MODE else 1
-    options = ["Basic", "Advanced", "Back"]
     while True:
         start_row = _draw_header(stdscr, "Config", None)
-        _draw_hints(stdscr, start_row, [("s", "basic"), ("a", "advanced"), ("b", "back")])
+        _draw_hints(
+            stdscr,
+            start_row,
+            [("←/→", "select"), ("Enter", "apply"), ("s", "basic"), ("a", "advanced"), ("b", "back")],
+        )
         start_row += 1
-        _draw_list(stdscr, options, selected, start_row)
+        label_basic = "[Basic]" if selected == 0 else "Basic"
+        label_adv = "[Advanced]" if selected == 1 else "Advanced"
+        line = f"Menus: {label_basic} {label_adv}"
+        _, width = stdscr.getmaxyx()
+        stdscr.addstr(start_row, 0, line[: width - 1])
         stdscr.refresh()
         key = stdscr.getch()
-        if key in (curses.KEY_UP, ord("k")):
-            selected = max(0, selected - 1)
-        elif key in (curses.KEY_DOWN, ord("j")):
-            selected = min(len(options) - 1, selected + 1)
+        if key in (curses.KEY_LEFT, ord("h")):
+            selected = 0
+        elif key in (curses.KEY_RIGHT, ord("l")):
+            selected = 1
         elif key in (curses.KEY_ENTER, 10, 13):
-            if options[selected] == "Basic":
-                ADVANCED_MODE = False
-                _save_config()
-            elif options[selected] == "Advanced":
-                ADVANCED_MODE = True
-                _save_config()
-            else:
-                return
+            ADVANCED_MODE = selected == 1
+            _save_config()
         elif key in (27, ord("b")):
             return
         elif key in (ord("s"),):
+            selected = 0
             ADVANCED_MODE = False
             _save_config()
         elif key in (ord("a"),):
+            selected = 1
             ADVANCED_MODE = True
             _save_config()
 
@@ -862,8 +1105,10 @@ def _reports_screen(stdscr, conn) -> None:
         "Back",
     ]
     selected = 0
+    include_provisional = True
     while True:
-        start_row = _draw_header(stdscr, "Reports", None)
+        subtitle = f"Include provisional: {'Yes' if include_provisional else 'No'} (t toggle)"
+        start_row = _draw_header(stdscr, "Reports", subtitle)
         _draw_hints(
             stdscr,
             start_row,
@@ -876,6 +1121,7 @@ def _reports_screen(stdscr, conn) -> None:
                 ("g", "gantt"),
                 ("u", "unalloc"),
                 ("n", "ending"),
+                ("t", "toggle provisional"),
                 ("b", "back"),
             ],
         )
@@ -887,48 +1133,82 @@ def _reports_screen(stdscr, conn) -> None:
             selected = max(0, selected - 1)
         elif key in (curses.KEY_DOWN, ord("j")):
             selected = min(len(options) - 1, selected + 1)
+        elif key in (ord("t"),):
+            include_provisional = not include_provisional
         elif key in (27, ord("b")):
             return
         elif key in (curses.KEY_ENTER, 10, 13):
             choice = options[selected]
             if choice == "Project Revenue":
-                _report_table(stdscr, "Project Revenue", project_revenue(conn, date.today()))
+                _report_table(
+                    stdscr,
+                    "Project Revenue",
+                    project_revenue(conn, date.today(), include_provisional),
+                )
             elif choice == "Client Revenue":
-                _report_table(stdscr, "Client Revenue", client_revenue(conn, date.today()))
+                _report_table(
+                    stdscr,
+                    "Client Revenue",
+                    client_revenue(conn, date.today(), include_provisional),
+                )
             elif choice == "Engineer Revenue":
-                _report_table(stdscr, "Engineer Revenue", engineer_revenue(conn, date.today()))
+                _report_table(
+                    stdscr,
+                    "Engineer Revenue",
+                    engineer_revenue(conn, date.today(), include_provisional),
+                )
             elif choice == "Client Revenue Year":
                 year = _prompt(stdscr, "Year (YYYY): ")
                 year_val = int(year) if year else date.today().year
-                _report_table(stdscr, f"Client Revenue {year_val}", client_revenue_year(conn, year_val))
+                _report_table(
+                    stdscr,
+                    f"Client Revenue {year_val}",
+                    client_revenue_year(conn, year_val, include_provisional),
+                )
             elif choice == "Scenario Revenue Year":
                 _scenario_list_screen(stdscr, conn)
             elif choice == "Engineer Gantt":
-                _engineer_gantt_report(stdscr, conn, False)
+                _engineer_gantt_report(stdscr, conn, False, include_provisional)
             elif choice == "Unallocated Engineer Gantt":
-                _engineer_gantt_report(stdscr, conn, True)
+                _engineer_gantt_report(stdscr, conn, True, include_provisional)
             elif choice == "Projects Ending Soon":
-                _projects_ending_report(stdscr, conn)
+                _projects_ending_report(stdscr, conn, include_provisional)
             else:
                 return
         elif key == ord("p"):
-            _report_table(stdscr, "Project Revenue", project_revenue(conn, date.today()))
+            _report_table(
+                stdscr,
+                "Project Revenue",
+                project_revenue(conn, date.today(), include_provisional),
+            )
         elif key == ord("c"):
-            _report_table(stdscr, "Client Revenue", client_revenue(conn, date.today()))
+            _report_table(
+                stdscr,
+                "Client Revenue",
+                client_revenue(conn, date.today(), include_provisional),
+            )
         elif key == ord("e"):
-            _report_table(stdscr, "Engineer Revenue", engineer_revenue(conn, date.today()))
+            _report_table(
+                stdscr,
+                "Engineer Revenue",
+                engineer_revenue(conn, date.today(), include_provisional),
+            )
         elif key == ord("y"):
             year = _prompt(stdscr, "Year (YYYY): ")
             year_val = int(year) if year else date.today().year
-            _report_table(stdscr, f"Client Revenue {year_val}", client_revenue_year(conn, year_val))
+            _report_table(
+                stdscr,
+                f"Client Revenue {year_val}",
+                client_revenue_year(conn, year_val, include_provisional),
+            )
         elif key == ord("s"):
             _scenario_list_screen(stdscr, conn)
         elif key == ord("g"):
-            _engineer_gantt_report(stdscr, conn, False)
+            _engineer_gantt_report(stdscr, conn, False, include_provisional)
         elif key == ord("u"):
-            _engineer_gantt_report(stdscr, conn, True)
+            _engineer_gantt_report(stdscr, conn, True, include_provisional)
         elif key == ord("n"):
-            _projects_ending_report(stdscr, conn)
+            _projects_ending_report(stdscr, conn, include_provisional)
 
 
 def _report_table(stdscr, title: str, rows: list[dict]) -> None:
@@ -986,11 +1266,11 @@ def _report_table(stdscr, title: str, rows: list[dict]) -> None:
             h_offset = max(0, h_offset - 1)
 
 
-def _engineer_gantt_report(stdscr, conn, unallocated_only: bool) -> None:
+def _engineer_gantt_report(stdscr, conn, unallocated_only: bool, include_provisional: bool) -> None:
     start = date.today()
     end = start.fromordinal(start.toordinal() + 90)
     engineers = _fetch_engineers(conn)
-    allocations = _fetch_allocations_range(conn, start.isoformat(), end.isoformat())
+    allocations = _fetch_allocations_range(conn, start.isoformat(), end.isoformat(), include_provisional)
 
     # build map
     alloc_map = {e.id: [] for e in engineers}
@@ -1042,25 +1322,30 @@ def _engineer_gantt_report(stdscr, conn, unallocated_only: bool) -> None:
                 _engineer_screen(stdscr, conn, rows[selected]["obj"])
 
 
-def _unallocated_report(stdscr, conn) -> None:
-    _engineer_gantt_report(stdscr, conn, True)
+def _unallocated_report(stdscr, conn, include_provisional: bool) -> None:
+    _engineer_gantt_report(stdscr, conn, True, include_provisional)
 
 
-def _projects_ending_report(stdscr, conn) -> None:
-    rows = projects_ending_with_details(conn, date.today(), 30)
+def _projects_ending_report(stdscr, conn, include_provisional: bool) -> None:
+    rows = projects_ending_with_details(conn, date.today(), 30, include_provisional)
     _report_table(stdscr, "Projects Ending Soon", rows)
 
 
-def _fetch_allocations_range(conn, start_iso: str, end_iso: str) -> list[dict]:
+def _fetch_allocations_range(
+    conn, start_iso: str, end_iso: str, include_provisional: bool = True
+) -> list[dict]:
     cur = conn.execute(
         """
-        SELECT a.id, a.engineer_id, a.project_id, a.start_date, a.end_date, e.name AS engineer
+        SELECT a.id, a.engineer_id, a.project_id, a.start_date, a.end_date, a.status, e.name AS engineer,
+               p.status AS project_status
         FROM allocation a
         JOIN engineer e ON e.id = a.engineer_id
+        JOIN project p ON p.id = a.project_id
         WHERE a.start_date <= ? AND (a.end_date IS NULL OR a.end_date >= ?)
+          AND (? = 1 OR (a.status = 'confirmed' AND p.status = 'confirmed'))
         ORDER BY e.name ASC, a.start_date ASC
         """,
-        (end_iso, start_iso),
+        (end_iso, start_iso, 1 if include_provisional else 0),
     )
     return [dict(row) for row in cur.fetchall()]
 
@@ -1079,8 +1364,9 @@ def _gantt_rows_by_engineer(rows: list[dict], start: date, end: date, width: int
             a_end = date.fromisoformat(alloc["end_date"]) if alloc["end_date"] else end
             start_offset = max(0, (a_start - start).days) // scale
             end_offset = max(0, (a_end - start).days) // scale
+            mark = "." if alloc.get("status") == "provisional" else "#"
             for i in range(start_offset, min(end_offset + 1, len(bar))):
-                bar[i] = "#"
+                bar[i] = mark
         label = f"{row['engineer']:<20}"[:20]
         output.append(label + " " + "".join(bar))
     return output
