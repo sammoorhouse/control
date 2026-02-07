@@ -9,7 +9,10 @@ from typing import Callable, Iterable
 from rich.console import Console
 from rich.console import Group
 from rich.panel import Panel
+from rich.console import Group
+from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 from rich.text import Text
 from rich import box
 
@@ -458,13 +461,103 @@ def _fuzzy_modal_select(
             term += chr(key)
             selected = 0
             offset = 0
+    del subtitle
+    prompt_label = search_prompt.rstrip(": ")
+    return _fuzzy_modal_select(stdscr, title, prompt_label, items)
+
+
+def _render_rich_lines(renderable, width: int) -> list[str]:
+    console = Console(record=True, width=max(20, width), force_terminal=False, color_system=None)
+    console.print(renderable)
+    return console.export_text(styles=False).splitlines()
+
+
+def _fuzzy_modal_select(
+    stdscr,
+    title: str,
+    prompt_label: str,
+    items: list[tuple[str, object]],
+) -> object | None:
+    term = ""
+    selected = 0
+    offset = 0
+    while True:
+        height, width = stdscr.getmaxyx()
+        modal_height = max(10, min(height - 2, 20))
+        modal_width = max(40, min(width - 4, 90))
+        start_y = (height - modal_height) // 2
+        start_x = (width - modal_width) // 2
+
+        results = items if not term else _fuzzy_sort_with_labels(term, items)
+        visible_rows = max(1, modal_height - 6)
+        selected = min(selected, max(0, len(results) - 1))
+        if selected < offset:
+            offset = selected
+        if selected >= offset + visible_rows:
+            offset = selected - visible_rows + 1
+        window_items = results[offset : offset + visible_rows]
+
+        lines = [Text(f"{prompt_label}: {term}", style="bold")]
+        if not results:
+            lines.append(Text("(no results)", style="dim"))
+        for idx, (label, _) in enumerate(window_items):
+            absolute = offset + idx
+            prefix = "▶ " if absolute == selected else "  "
+            style = "reverse" if absolute == selected else ""
+            lines.append(Text(prefix + label, style=style))
+
+        panel = Panel(
+            Group(*lines),
+            title=title,
+            subtitle="type to search • ↑/↓ move • Enter select • Esc cancel",
+            border_style="cyan",
+            box=box.ROUNDED,
+            width=modal_width,
+        )
+        rendered = _render_rich_lines(panel, modal_width)
+        stdscr.clear()
+        for idx, line in enumerate(rendered[:modal_height]):
+            stdscr.addstr(start_y + idx, start_x, line[: modal_width - 1])
+        stdscr.refresh()
+
+        key = stdscr.getch()
+        if key in (27, ord("q"), ord("b")):
+            return None
+        if key in (curses.KEY_ENTER, 10, 13):
+            if results:
+                return results[selected][1]
+            continue
+        if key in (curses.KEY_UP, ord("k")):
+            selected = max(0, selected - 1)
+            continue
+        if key in (curses.KEY_DOWN, ord("j")):
+            selected = min(max(0, len(results) - 1), selected + 1)
+            continue
+        if key in (curses.KEY_BACKSPACE, 127, 8):
+            term = term[:-1]
+            selected = 0
+            offset = 0
+            continue
+        if 32 <= key <= 126:
+            term += chr(key)
+            selected = 0
+            offset = 0
 
 
 def _draw_header(stdscr, title: str, subtitle: str | None = None) -> int:
     stdscr.clear()
     _, width = stdscr.getmaxyx()
     content = Text(title, style="bold cyan")
+    _, width = stdscr.getmaxyx()
+    content = Text(title, style="bold cyan")
     if subtitle:
+        content.append("\n")
+        content.append(subtitle)
+    panel = Panel(content, box=box.ROUNDED, border_style="cyan")
+    rendered = _render_rich_lines(panel, width - 1)
+    for idx, line in enumerate(rendered):
+        stdscr.addstr(idx, 0, line[: width - 1])
+    return len(rendered)
         content.append("\n")
         content.append(subtitle)
     panel = Panel(content, box=box.ROUNDED, border_style="cyan")
