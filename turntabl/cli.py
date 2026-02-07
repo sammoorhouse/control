@@ -269,8 +269,6 @@ def remove_allocation(allocation_id: int):
     typer.echo("Allocation removed.")
 
 
-
-
 @at_risk_app.command("add")
 def add_at_risk(
     risk_type: str,
@@ -309,6 +307,7 @@ def remove_at_risk(at_risk_id: int):
     if cur.rowcount == 0:
         raise typer.Exit(code=1)
     typer.echo("At-risk item removed.")
+
 
 @report_app.command("unallocated")
 def report_unallocated(
@@ -410,8 +409,6 @@ def report_client_revenue_year_command(
     rows = report_client_revenue_year(conn, year, include_provisional)
     conn.close()
     _print_rows(rows)
-
-
 
 
 @report_app.command("at-risks")
