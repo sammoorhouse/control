@@ -7,7 +7,10 @@ from datetime import date, datetime
 from typing import Callable, Iterable
 
 from rich.console import Console
+from rich.console import Group
+from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 from rich import box
 
 from .db import (
@@ -265,49 +268,112 @@ def _select_with_search(
     items: list[tuple[str, object]],
     search_prompt: str,
 ) -> object | None:
-    term = _prompt(stdscr, search_prompt)
-    if not term:
-        return None
-    results = _fuzzy_sort_with_labels(term, items)
-    ordered_labels = [label for label, _ in results]
-    idx = _select_from_list(stdscr, title, subtitle, ordered_labels)
-    if idx is None:
-        return None
-    return results[idx][1]
+    del subtitle
+    prompt_label = search_prompt.rstrip(": ")
+    return _fuzzy_modal_select(stdscr, title, prompt_label, items)
+
+
+def _render_rich_lines(renderable, width: int) -> list[str]:
+    console = Console(record=True, width=max(20, width), force_terminal=False, color_system=None)
+    console.print(renderable)
+    return console.export_text(styles=False).splitlines()
+
+
+def _fuzzy_modal_select(
+    stdscr,
+    title: str,
+    prompt_label: str,
+    items: list[tuple[str, object]],
+) -> object | None:
+    term = ""
+    selected = 0
+    offset = 0
+    while True:
+        height, width = stdscr.getmaxyx()
+        modal_height = max(10, min(height - 2, 20))
+        modal_width = max(40, min(width - 4, 90))
+        start_y = (height - modal_height) // 2
+        start_x = (width - modal_width) // 2
+
+        results = items if not term else _fuzzy_sort_with_labels(term, items)
+        visible_rows = max(1, modal_height - 6)
+        selected = min(selected, max(0, len(results) - 1))
+        if selected < offset:
+            offset = selected
+        if selected >= offset + visible_rows:
+            offset = selected - visible_rows + 1
+        window_items = results[offset : offset + visible_rows]
+
+        lines = [Text(f"{prompt_label}: {term}", style="bold")]
+        if not results:
+            lines.append(Text("(no results)", style="dim"))
+        for idx, (label, _) in enumerate(window_items):
+            absolute = offset + idx
+            prefix = "▶ " if absolute == selected else "  "
+            style = "reverse" if absolute == selected else ""
+            lines.append(Text(prefix + label, style=style))
+
+        panel = Panel(
+            Group(*lines),
+            title=title,
+            subtitle="type to search • ↑/↓ move • Enter select • Esc cancel",
+            border_style="cyan",
+            box=box.ROUNDED,
+            width=modal_width,
+        )
+        rendered = _render_rich_lines(panel, modal_width)
+        stdscr.clear()
+        for idx, line in enumerate(rendered[:modal_height]):
+            stdscr.addstr(start_y + idx, start_x, line[: modal_width - 1])
+        stdscr.refresh()
+
+        key = stdscr.getch()
+        if key in (27, ord("q"), ord("b")):
+            return None
+        if key in (curses.KEY_ENTER, 10, 13):
+            if results:
+                return results[selected][1]
+            continue
+        if key in (curses.KEY_UP, ord("k")):
+            selected = max(0, selected - 1)
+            continue
+        if key in (curses.KEY_DOWN, ord("j")):
+            selected = min(max(0, len(results) - 1), selected + 1)
+            continue
+        if key in (curses.KEY_BACKSPACE, 127, 8):
+            term = term[:-1]
+            selected = 0
+            offset = 0
+            continue
+        if 32 <= key <= 126:
+            term += chr(key)
+            selected = 0
+            offset = 0
 
 
 def _draw_header(stdscr, title: str, subtitle: str | None = None) -> int:
     stdscr.clear()
-    title_attr = curses.A_BOLD | (curses.color_pair(1) if COLOR_ENABLED else 0)
-    stdscr.addstr(0, 0, title, title_attr)
+    _, width = stdscr.getmaxyx()
+    content = Text(title, style="bold cyan")
     if subtitle:
-        stdscr.addstr(1, 0, subtitle)
-        return 2
-    return 1
+        content.append("\n")
+        content.append(subtitle)
+    panel = Panel(content, box=box.ROUNDED, border_style="cyan")
+    rendered = _render_rich_lines(panel, width - 1)
+    for idx, line in enumerate(rendered):
+        stdscr.addstr(idx, 0, line[: width - 1])
+    return len(rendered)
 
 
 def _draw_hints(stdscr, row: int, hints: list[tuple[str, str]]) -> None:
+    _, width = stdscr.getmaxyx()
     if ADVANCED_MODE:
-        keys = "".join(key for key, _ in hints)
-        stdscr.addstr(row, 0, keys, curses.A_DIM if COLOR_ENABLED else 0)
-        return
-    col = 0
-    for key, word in hints:
-        lower = word.lower()
-        try:
-            idx = lower.index(key.lower())
-        except ValueError:
-            idx = 0
-        for i, ch in enumerate(word):
-            attr = 0
-            if i == idx:
-                attr |= curses.A_UNDERLINE
-            if COLOR_ENABLED and i == idx:
-                attr |= curses.color_pair(2)
-            stdscr.addstr(row, col, ch, attr)
-            col += 1
-        stdscr.addstr(row, col, " ")
-        col += 1
+        hint_text = " ".join(key for key, _ in hints)
+    else:
+        hint_text = " • ".join(f"[{key}] {word}" for key, word in hints)
+    rendered = _render_rich_lines(Panel(Text(hint_text, style="dim"), box=box.SIMPLE), width - 1)
+    for idx, line in enumerate(rendered[:2]):
+        stdscr.addstr(row + idx, 0, line[: width - 1])
 
 
 def _allocation_detail_screen(stdscr, conn, allocation_id: int) -> None:
@@ -357,17 +423,20 @@ def _allocation_detail_screen(stdscr, conn, allocation_id: int) -> None:
 
 def _draw_list(stdscr, items: list[str], selected: int, start_row: int) -> None:
     height, width = stdscr.getmaxyx()
-    max_rows = height - start_row - 1
+    max_rows = max(1, height - start_row - 1)
     offset = 0
     if selected >= max_rows:
         offset = selected - max_rows + 1
     view = items[offset : offset + max_rows]
+    rows = []
     for idx, item in enumerate(view):
-        row = start_row + idx
-        if offset + idx == selected:
-            stdscr.addstr(row, 0, item[: width - 1], curses.A_REVERSE)
-        else:
-            stdscr.addstr(row, 0, item[: width - 1])
+        absolute = offset + idx
+        prefix = "▶ " if absolute == selected else "  "
+        style = "reverse" if absolute == selected else ""
+        rows.append(Text(prefix + item, style=style))
+    rendered = _render_rich_lines(Panel(Group(*rows), box=box.SIMPLE), width - 1)
+    for idx, line in enumerate(rendered[: max_rows]):
+        stdscr.addstr(start_row + idx, 0, line[: width - 1])
 
 
 def _select_from_list(
@@ -749,10 +818,12 @@ def _engineers_list(stdscr, conn):
         elif key in (curses.KEY_DOWN, ord("j")):
             selected = min(len(engineers) - 1, selected + 1)
         elif key in (ord("/"), ord("s")):
-            term = _prompt(stdscr, "Search engineer: ")
-            items = [(f"{e.name} (L{e.level}, Cohort {e.cohort})", e) for e in _fetch_engineers(conn)]
-            engineers = [obj for _, obj in _fuzzy_sort_with_labels(term, items)]
-            selected = 0
+            all_engineers = _fetch_engineers(conn)
+            items = [(f"{e.name} (L{e.level}, Cohort {e.cohort})", e) for e in all_engineers]
+            choice = _select_with_search(stdscr, "Search engineers", "", items, "Search")
+            if choice:
+                engineers = all_engineers
+                selected = next((idx for idx, e in enumerate(engineers) if e.id == choice.id), 0)
         elif key == ord("a"):
             err = _add_engineer_prompt(conn, stdscr)
             if err:
@@ -799,10 +870,12 @@ def _clients_list(stdscr, conn):
         elif key in (curses.KEY_DOWN, ord("j")):
             selected = min(len(clients) - 1, selected + 1)
         elif key in (ord("/"), ord("s")):
-            term = _prompt(stdscr, "Search client: ")
-            items_pairs = [(c.name, c) for c in _fetch_clients(conn)]
-            clients = [obj for _, obj in _fuzzy_sort_with_labels(term, items_pairs)]
-            selected = 0
+            all_clients = _fetch_clients(conn)
+            items_pairs = [(c.name, c) for c in all_clients]
+            choice = _select_with_search(stdscr, "Search clients", "", items_pairs, "Search")
+            if choice:
+                clients = all_clients
+                selected = next((idx for idx, c in enumerate(clients) if c.id == choice.id), 0)
         elif key == ord("a"):
             err = _add_client_prompt(conn, stdscr)
             if err:
