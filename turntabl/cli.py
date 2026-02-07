@@ -23,6 +23,7 @@ from .reports import (
     report_engineer_revenue,
     report_project_revenue,
     report_client_revenue_year,
+    report_everything_year,
     projects_ending_with_details,
     unallocated_engineers,
 )
@@ -173,7 +174,7 @@ def add_project(
     start_date: str,
     end_date: str,
     agreed_rate: Optional[float] = None,
-    status: str = typer.Option("confirmed", case_insensitive=True),
+    status: str = typer.Option("confirmed"),
 ):
     """Add a project."""
     conn = _ensure_db()
@@ -215,7 +216,7 @@ def add_allocation(
     project_id: int,
     start_date: str,
     end_date: str,
-    status: Optional[str] = typer.Option(None, case_insensitive=True),
+    status: Optional[str] = typer.Option(None),
 ):
     """Allocate an engineer to a project for a date range."""
     conn = _ensure_db()
@@ -362,6 +363,18 @@ def report_client_revenue_year_command(
     """Client revenue by month for a year."""
     conn = _ensure_db()
     rows = report_client_revenue_year(conn, year, include_provisional)
+    conn.close()
+    _print_rows(rows)
+
+
+@report_app.command("everything-year")
+def report_everything_year_command(
+    year: int = typer.Option(date.today().year, min=2000, max=2100),
+    include_provisional: bool = typer.Option(True, "--include-provisional/--exclude-provisional"),
+):
+    """Everything report by client > project > allocation with monthly revenue totals."""
+    conn = _ensure_db()
+    rows = report_everything_year(conn, year, include_provisional)
     conn.close()
     _print_rows(rows)
 
