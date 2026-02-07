@@ -73,7 +73,6 @@ def project_revenue(conn: sqlite3.Connection, as_of: date) -> list[dict]:
     ]
 
 
-def client_revenue(conn: sqlite3.Connection, as_of: date) -> list[dict]:
     cur = conn.execute(
         """
         SELECT c.id AS client_id, c.name AS client, a.start_date, a.end_date, p.agreed_rate, e.day_rate
